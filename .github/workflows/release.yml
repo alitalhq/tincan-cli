@@ -20,9 +20,22 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
+          # macos-13 is retired and macos-15-intel is the standard label that
+          # replaced it. It is also the last x86_64 macOS image Actions will
+          # offer; when it goes in August 2027 this target has to be built
+          # somewhere else or dropped.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
+          # Native arm64, so no qemu and no cross toolchain.
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          # audiopus_sys ships a prebuilt libopus.lib for MSVC and OPUS_STATIC
+          # picks it up, so Windows needs no system dependencies at all.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +63,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Verify the binary is self-contained
+        if: runner.os != 'Windows'
         run: |
           BIN=target/${{ matrix.target }}/release/tincan
           if [ "${{ runner.os }}" = "macOS" ]; then
@@ -64,7 +78,23 @@ jobs:
             exit 1
           fi
 
+      # There is no ldd here, so the check is the other way round: a statically
+      # linked Opus leaves no DLL beside the binary. One appearing means
+      # OPUS_STATIC did not take and the .zip would ship half an application.
+      - name: Verify the binary is self-contained (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "target/${{ matrix.target }}/release"
+          $dlls = Get-ChildItem -Path $dir -Filter "*opus*.dll" -ErrorAction SilentlyContinue
+          if ($dlls) {
+            Write-Output "::error::tincan links Opus dynamically; the released binary would not run without $($dlls.Name)"
+            exit 1
+          }
+          Write-Output "no Opus DLL beside the binary; Opus is linked statically"
+
       - name: Package
+        if: runner.os != 'Windows'
         run: |
           BIN=target/${{ matrix.target }}/release/tincan
           strip "$BIN" || true
@@ -76,12 +106,36 @@ jobs:
             shasum -a 256 "$ASSET" > "$ASSET.sha256"
           fi
 
+      # A .zip rather than a .tar.gz: Windows opens one in Explorer and needs a
+      # tool for the other. Get-FileHash prints a bare uppercase digest, so the
+      # checksum file is assembled by hand to match the `<sha>  <file>` shape
+      # the installer, the tap and the npm shim all read with `cut -d' ' -f1`.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/tincan.exe"
+          $asset = "tincan-${{ matrix.target }}.zip"
+          Compress-Archive -Path $bin -DestinationPath $asset -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLower()
+          "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii -NoNewline
+
       - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows'
         with:
           name: tincan-${{ matrix.target }}
           path: |
             tincan-${{ matrix.target }}.tar.gz
             tincan-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: tincan-${{ matrix.target }}
+          path: |
+            tincan-${{ matrix.target }}.zip
+            tincan-${{ matrix.target }}.zip.sha256
           if-no-files-found: error
 
   release:
@@ -113,8 +167,10 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#v}"
-          ARM64_SHA=$(cut -d' ' -f1 artifacts/tincan-aarch64-apple-darwin.tar.gz.sha256)
-          LINUX_SHA=$(cut -d' ' -f1 artifacts/tincan-x86_64-unknown-linux-gnu.tar.gz.sha256)
+          MAC_ARM_SHA=$(cut -d' ' -f1 artifacts/tincan-aarch64-apple-darwin.tar.gz.sha256)
+          MAC_INTEL_SHA=$(cut -d' ' -f1 artifacts/tincan-x86_64-apple-darwin.tar.gz.sha256)
+          LINUX_INTEL_SHA=$(cut -d' ' -f1 artifacts/tincan-x86_64-unknown-linux-gnu.tar.gz.sha256)
+          LINUX_ARM_SHA=$(cut -d' ' -f1 artifacts/tincan-aarch64-unknown-linux-gnu.tar.gz.sha256)
           SOURCE_SHA=$(curl -fsSL "https://github.com/bilalyazicioglu/tincan-cli/archive/refs/tags/${TAG}.tar.gz" | sha256sum | cut -d' ' -f1)
 
           git clone "https://x-access-token:${GH_TOKEN}@github.com/bilalyazicioglu/homebrew-tap.git" tap || exit 0
@@ -127,10 +183,16 @@ jobs:
 
             if OS.mac? && Hardware::CPU.arm?
               url "https://github.com/bilalyazicioglu/tincan-cli/releases/download/${TAG}/tincan-aarch64-apple-darwin.tar.gz"
-              sha256 "${ARM64_SHA}"
+              sha256 "${MAC_ARM_SHA}"
+            elsif OS.mac? && Hardware::CPU.intel?
+              url "https://github.com/bilalyazicioglu/tincan-cli/releases/download/${TAG}/tincan-x86_64-apple-darwin.tar.gz"
+              sha256 "${MAC_INTEL_SHA}"
             elsif OS.linux? && Hardware::CPU.intel?
               url "https://github.com/bilalyazicioglu/tincan-cli/releases/download/${TAG}/tincan-x86_64-unknown-linux-gnu.tar.gz"
-              sha256 "${LINUX_SHA}"
+              sha256 "${LINUX_INTEL_SHA}"
+            elsif OS.linux? && Hardware::CPU.arm?
+              url "https://github.com/bilalyazicioglu/tincan-cli/releases/download/${TAG}/tincan-aarch64-unknown-linux-gnu.tar.gz"
+              sha256 "${LINUX_ARM_SHA}"
             else
               url "https://github.com/bilalyazicioglu/tincan-cli/archive/refs/tags/${TAG}.tar.gz"
               sha256 "${SOURCE_SHA}"
