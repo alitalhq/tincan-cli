@@ -70,11 +70,12 @@ impl Denoiser {
     /// Any length that is not a whole number of RNNoise frames is left untouched,
     /// because half-cleaning a frame would be worse than not cleaning it.
     pub fn process(&mut self, pcm: &mut [f32]) {
-        if !pcm.len().is_multiple_of(RNNOISE_FRAME) {
+        let (frames, leftover) = pcm.as_chunks_mut::<RNNOISE_FRAME>();
+        if !leftover.is_empty() {
             return;
         }
 
-        for chunk in pcm.chunks_exact_mut(RNNOISE_FRAME) {
+        for chunk in frames {
             for (out, sample) in self.scaled.iter_mut().zip(chunk.iter()) {
                 *out = sample * FULL_SCALE;
             }
