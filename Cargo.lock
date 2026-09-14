@@ -4200,6 +4200,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "audiopus",
+ "blake2",
  "bytes",
  "chrono",
  "clap",

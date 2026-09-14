@@ -8,7 +8,7 @@
 //! ```text
 //! coordinator                            joiner
 //!     │── Challenge{nonce} ───────────────▶│
-//!     │◀── Hello{name, Argon2id(password)}─│
+//!     │◀── Hello{name, MAC(key, nonce)} ───│
 //!     │── Welcome{you, room} ─────────────▶│   (or Rejected)
 //!     │── Roster / Chat / Notice ─────────▶│   (broadcast)
 //!     │◀── SwitchChannel / Chat / Leave ───│
@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 use super::endpoint::to_peer_id;
 use super::voice::VoiceMesh;
 use super::{Command, Event, Session, now};
-use crate::auth;
+use crate::auth::{self, Admission, Key};
 use crate::invite;
 use crate::proto::{self, MAX_MESSAGE_BYTES, PeerId, ToCoordinator, ToPeer};
 use crate::room::Room;
@@ -65,7 +65,7 @@ pub(crate) struct Shared {
     /// The broadcast that reaches every connected peer **and** the host's own
     /// interface.
     broadcast: broadcast::Sender<ToPeer>,
-    password: String,
+    admission: Admission,
 }
 
 impl Shared {
@@ -116,7 +116,7 @@ impl Coordinator {
     pub async fn spawn(
         endpoint: Endpoint,
         room: Room,
-        password: String,
+        admission: Admission,
         host_name: &str,
         voice: Option<VoiceMesh>,
     ) -> Result<Session> {
@@ -130,7 +130,7 @@ impl Coordinator {
         let shared = Arc::new(Shared {
             room: Mutex::new(room),
             broadcast: broadcast_tx,
-            password,
+            admission,
         });
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_DEPTH);
@@ -271,7 +271,7 @@ async fn serve_peer(shared: Arc<Shared>, conn: Connection, peer: PeerId) -> Resu
         bail!("a different message arrived instead of the handshake");
     };
 
-    if !auth::verify(&shared.password, &nonce, &proof) {
+    if !shared.admission.admits(&nonce, &proof) {
         warn!("{} tried with the wrong password", peer.short());
         return reject(send, "wrong room password").await;
     }
@@ -348,15 +348,15 @@ async fn serve_peer(shared: Arc<Shared>, conn: Connection, peer: PeerId) -> Resu
 pub struct Client;
 
 impl Client {
-    /// Connects to the coordinator named by the invite code and completes the
-    /// handshake.
+    /// Connects to the coordinator — named by an invite code, or derived from a room name
+    /// and passphrase — and completes the handshake.
     ///
     /// In normal use the target is just an identity and discovery finds its address.
     /// Tests skip discovery by passing a full `EndpointAddr`.
     pub async fn connect(
         endpoint: Endpoint,
         target: impl Into<EndpointAddr>,
-        password: &str,
+        key: &Key,
         name: &str,
         voice: Option<VoiceMesh>,
     ) -> Result<Session> {
@@ -365,7 +365,7 @@ impl Client {
         let conn = endpoint
             .connect(target, proto::ALPN)
             .await
-            .context("could not connect to the room — the code may be wrong, or the room closed")?;
+            .context("could not reach the room — the code, room name or passphrase may be wrong, or the room closed")?;
 
         let (mut send, mut recv) = conn.accept_bi().await.context("could not establish the control stream")?;
 
@@ -374,7 +374,7 @@ impl Client {
             bail!("unexpected greeting message");
         };
 
-        let proof = auth::proof(password, &nonce)?;
+        let proof = auth::proof(key, &nonce);
         write_msg(
             &mut send,
             &ToCoordinator::Hello {

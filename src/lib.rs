@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod config;
 pub mod invite;
 pub mod logo;
+pub mod passphrase;
 pub mod proto;
 pub mod room;
 

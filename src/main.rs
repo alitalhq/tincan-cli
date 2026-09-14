@@ -3,13 +3,15 @@
 use std::io::{IsTerminal as _, Write as _};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser, Subcommand};
 use iroh::Endpoint;
 use tincan::audio;
+use tincan::auth::{Admission, Key, RoomSecret};
 use tincan::clipboard;
 use tincan::config::Config;
 use tincan::invite;
+use tincan::passphrase;
 use tincan::audio::device::Wanted;
 use tincan::net::Command;
 use tincan::net::control::{Client, Coordinator};
@@ -21,6 +23,8 @@ use tincan::ui::{self, VoiceControl};
 
 /// Channels created by default when a room is opened.
 const DEFAULT_CHANNELS: &str = "general,gaming,music";
+/// What a room opened without a name is called on screen.
+const UNNAMED_ROOM: &str = "tincan";
 
 #[derive(Parser)]
 #[command(
@@ -36,29 +40,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Sub {
-    /// Open a new room and print its invite code.
+    /// Open a room: by name and passphrase, or without a name behind an invite code.
     Host {
+        /// Room name. With the passphrase it is the room's address: whoever knows both can
+        /// join by typing them. Leave it out to get an invite code instead.
+        room: Option<String>,
         /// The nickname you appear under in the room.
         #[arg(long, short)]
         name: Option<String>,
-        /// Room password. Without one, anyone who has the code can walk in.
+        /// Passphrase. With a room name one is generated if you leave this out; without a
+        /// room name and without this, anyone who has the code can walk in.
         #[arg(long, short)]
         password: Option<String>,
-        /// Room name.
-        #[arg(long, default_value = "tincan")]
-        room: String,
         /// Comma-separated list of channels.
         #[arg(long, default_value = DEFAULT_CHANNELS)]
         channels: String,
         #[command(flatten)]
         audio: AudioArgs,
     },
-    /// Join an existing room with an invite code.
+    /// Join a room by its name, or with an invite code.
     Join {
-        /// The invite code the host shared.
-        code: String,
+        /// The room name, or the invite code the host shared.
+        room: String,
+        /// The nickname you appear under in the room.
         #[arg(long, short)]
         name: Option<String>,
+        /// Passphrase. Joining by room name without it asks for it instead, which keeps
+        /// it out of the process list.
         #[arg(long, short)]
         password: Option<String>,
         #[command(flatten)]
@@ -171,18 +179,18 @@ fn report_log(path: Option<PathBuf>) {
 async fn run(command: Sub) -> Result<()> {
     match command {
         Sub::Host {
+            room,
             name,
             password,
-            room,
             channels,
             audio,
-        } => host(name, password, room, channels, audio).await,
+        } => host(room, name, password, channels, audio).await,
         Sub::Join {
-            code,
+            room,
             name,
             password,
             audio,
-        } => join(code, name, password, audio).await,
+        } => join(room, name, password, audio).await,
         Sub::Devices => {
             println!("{}", audio::device::describe_devices()?);
             Ok(())
@@ -195,9 +203,9 @@ async fn run(command: Sub) -> Result<()> {
 }
 
 async fn host(
+    room_name: Option<String>,
     name: Option<String>,
     password: Option<String>,
-    room_name: String,
     channels: String,
     audio: AudioArgs,
 ) -> Result<()> {
@@ -207,29 +215,56 @@ async fn host(
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty())
         .collect();
-    let room = Room::new(room_name, channels)?;
+
+    // A room opened by name always has a passphrase, generated unless one was given: with
+    // the name it is the room's address, and a guessable one is a room anyone can find.
+    let generated = room_name.is_some() && password.is_none();
+    let password = match password {
+        Some(typed) => typed,
+        None if generated => passphrase::generate(),
+        None => String::new(),
+    };
+    let secret = match &room_name {
+        Some(room) => {
+            if !generated && passphrase::is_weak(&password) {
+                println!("{}", tincan::logo::heading(
+                    "  that passphrase is easy to guess, and here it is the room's address as well as its lock.\n  leave out -p and tincan makes one up.",
+                ));
+            }
+            Some(RoomSecret::derive(room, &password)?)
+        }
+        None => None,
+    };
+    let room = Room::new(room_name.as_deref().unwrap_or(UNNAMED_ROOM).trim(), channels)?;
 
     println!("{}", tincan::logo::heading("  connecting to the network…"));
-    let endpoint = endpoint::bind().await?;
+    let endpoint = endpoint::bind(secret.as_ref().map(RoomSecret::identity)).await?;
     let me = endpoint::to_peer_id(endpoint.id());
+    let admission = match &secret {
+        Some(secret) => Admission::room(secret, &password)?,
+        None => Admission::invite(&password, &me)?,
+    };
     let (mesh, control) = setup_voice(&endpoint, me, &audio);
 
-    let mut session = Coordinator::spawn(
-        endpoint,
-        room,
-        password.unwrap_or_default(),
-        &nickname(name),
-        mesh,
-    )
-    .await?;
+    let mut session = Coordinator::spawn(endpoint, room, admission, &nickname(name), mesh).await?;
 
-    let copied = clipboard::copy(&session.invite_code);
-    println!("\n{}", tincan::logo::heading("  the room is open. send this code to whoever you want in it:"));
-    println!("\n    {}\n", tincan::logo::code(&session.invite_code));
-    if copied {
-        println!("{}", tincan::logo::heading("  it is on your clipboard already."));
+    match &room_name {
+        Some(room) => {
+            println!("\n{}", tincan::logo::heading("  the room is open. tell whoever you want in it:"));
+            println!("\n    room:        {}", tincan::logo::code(room.trim()));
+            println!("    passphrase:  {}\n", tincan::logo::code(&password));
+            println!("{}", tincan::logo::heading(&format!("  they run:  tincan join {}", shell_word(room.trim()))));
+        }
+        None => {
+            let copied = clipboard::copy(&session.invite_code);
+            println!("\n{}", tincan::logo::heading("  the room is open. send this code to whoever you want in it:"));
+            println!("\n    {}\n", tincan::logo::code(&session.invite_code));
+            if copied {
+                println!("{}", tincan::logo::heading("  it is on your clipboard already."));
+            }
+            println!("{}", tincan::logo::heading(&format!("  they run:  tincan join {}", session.invite_code)));
+        }
     }
-    println!("{}", tincan::logo::heading(&format!("  they run:  tincan join {}", session.invite_code)));
 
     // Wait for the user rather than a timer. The interface takes over the whole
     // screen, and a 63-character code is not something anyone can copy against a
@@ -251,31 +286,61 @@ async fn host(
 }
 
 async fn join(
-    code: String,
+    room: String,
     name: Option<String>,
     password: Option<String>,
     audio: AudioArgs,
 ) -> Result<()> {
     tincan::logo::print_banner();
-    let key = invite::decode(&code).context("could not read the invite code")?;
-    let coordinator = PeerId(key);
+    let (coordinator, key) = if invite::looks_like_code(&room) {
+        let coordinator = PeerId(invite::decode(&room).context("could not read the invite code")?);
+        let key = Key::for_invite(&password.unwrap_or_default(), &coordinator)?;
+        (coordinator, key)
+    } else {
+        let passphrase = match password {
+            Some(typed) => typed,
+            None => ask_passphrase(&room)?,
+        };
+        let secret = RoomSecret::derive(&room, &passphrase)?;
+        (secret.coordinator(), secret.key().clone())
+    };
 
     println!("{}", tincan::logo::heading("  connecting to the room…"));
-    let endpoint = endpoint::bind().await?;
+    // The joiner's own identity is always fresh: only the coordinator's is derived.
+    let endpoint = endpoint::bind(None).await?;
     let me = endpoint::to_peer_id(endpoint.id());
     let (mesh, control) = setup_voice(&endpoint, me, &audio);
 
     let target = endpoint::to_endpoint_id(&coordinator)?;
-    let session = Client::connect(
-        endpoint,
-        target,
-        &password.unwrap_or_default(),
-        &nickname(name),
-        mesh,
-    )
-    .await?;
+    let session = Client::connect(endpoint, target, &key, &nickname(name), mesh).await?;
 
     ui::run(session, control, audio.ptt).await
+}
+
+/// Reads the passphrase from the terminal, or from stdin when it is piped.
+///
+/// `-p` still works, but anyone on the machine can read it in `ps` — and for a room opened
+/// by name the passphrase is the room's address, not only its lock. It is not hidden while
+/// typed: it is meant to be said out loud anyway.
+fn ask_passphrase(room: &str) -> Result<String> {
+    print!("{}", tincan::logo::heading(&format!("  passphrase for {}: ", room.trim())));
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("could not read the passphrase")?;
+    let passphrase = line.trim().to_string();
+    ensure!(!passphrase.is_empty(), "joining a room by name needs its passphrase");
+    Ok(passphrase)
+}
+
+/// Quotes a room name for the "they run" line when the shell would split it.
+fn shell_word(word: &str) -> String {
+    if word.chars().all(|c| c.is_alphanumeric() || "-_.".contains(c)) {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
 }
 
 /// How the wait at the prompt ended.
@@ -361,6 +426,35 @@ fn nickname(explicit: Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_takes_the_room_name_as_its_argument() {
+        let cli = Cli::try_parse_from(["tincan", "host", "lobby", "-p", "a-b-c-d"]).unwrap();
+        let Sub::Host { room, password, .. } = cli.command else {
+            panic!("expected host");
+        };
+        assert_eq!(room.as_deref(), Some("lobby"));
+        assert_eq!(password.as_deref(), Some("a-b-c-d"));
+
+        let cli = Cli::try_parse_from(["tincan", "host"]).unwrap();
+        assert!(matches!(cli.command, Sub::Host { room: None, .. }), "the unnamed room stays");
+    }
+
+    #[test]
+    fn join_takes_a_room_name_or_a_code() {
+        for target in ["lobby", "n73w-kuqc-uog2"] {
+            let cli = Cli::try_parse_from(["tincan", "join", target]).unwrap();
+            assert!(matches!(cli.command, Sub::Join { ref room, .. } if room == target));
+        }
+    }
+
+    #[test]
+    fn room_names_are_quoted_only_when_the_shell_needs_it() {
+        assert_eq!(shell_word("lobby"), "lobby");
+        assert_eq!(shell_word("game-night_2"), "game-night_2");
+        assert_eq!(shell_word("game night"), "'game night'");
+        assert_eq!(shell_word("bob's"), "'bob'\\''s'");
+    }
 
     #[test]
     fn completions_generate_for_supported_shells() {
