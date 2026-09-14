@@ -297,7 +297,8 @@ behind iroh:
 So, put plainly: no server holds your room and no server can hear it, but two people
 cannot currently find each other without n0's. If those services went away, new
 connections would stop working. Pointing tincan at a relay and a DNS server you run
-yourself is something iroh supports and tincan does not expose yet.
+yourself is something iroh supports and tincan does not expose yet — that is
+[issue #136](https://github.com/bilalyazicioglu/tincan-cli/issues/136).
 
 ### What the microphone sends
 
@@ -427,7 +428,7 @@ decisions and are not used in the product.
   punching both go through servers run by Number Zero, set out under
   [What tincan depends on](#what-tincan-depends-on). This holds even for two machines on
   the same network: the preset tincan uses carries no local discovery, so a room does not
-  form without an internet connection. None of it is configurable yet.
+  form without an internet connection. None of it is configurable yet; #136 tracks that.
 - **The first second of a connection flows through a relay** before switching to a direct
   link. You may notice the latency in the first moments after joining.
 
