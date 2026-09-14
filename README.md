@@ -73,18 +73,38 @@ npx tincan-cli host
 npm install -g tincan-cli
 ```
 
-**Shell script:**
+**Shell script (macOS & Linux):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bilalyazicioglu/tincan-cli/main/install.sh | sh
 ```
 
 This downloads a prebuilt binary for your platform into `~/.local/bin` and verifies its
-checksum. macOS (Apple Silicon) and Linux (x86_64) have prebuilt binaries; anywhere
-else — Intel Macs and arm64 Linux included — the script falls back to building from
-source. If
-you would rather read the script before running it — always a reasonable instinct with
-`curl | sh` — it lives at [`install.sh`](install.sh) in this repo.
+checksum. Anywhere without one it falls back to building from source. If you would rather
+read the script before running it — always a reasonable instinct with `curl | sh` — it
+lives at [`install.sh`](install.sh) in this repo.
+
+**Windows:** use `npx tincan-cli host`, or download
+`tincan-x86_64-pc-windows-msvc.zip` from the
+[latest release](https://github.com/bilalyazicioglu/tincan-cli/releases/latest) and put
+`tincan.exe` somewhere on your `PATH`. The shell script above is POSIX and will not
+install it for you.
+
+Prebuilt binaries are published for these five targets:
+
+| Platform | Target |
+| :--- | :--- |
+| macOS, Apple Silicon | `aarch64-apple-darwin` |
+| macOS, Intel | `x86_64-apple-darwin` |
+| Linux, x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux, arm64 | `aarch64-unknown-linux-gnu` |
+| Windows, x64 | `x86_64-pc-windows-msvc` |
+
+A word on the last row: the Windows binary compiles and the test suite passes on
+Windows in CI, which is not the same as the application having been used there. The
+terminal UI, WASAPI device enumeration and the microphone permission prompt have not
+been exercised on a real Windows machine. If you try it, [say how it
+went](https://github.com/bilalyazicioglu/tincan-cli/issues).
 
 **From source**, if you prefer it or your platform has no prebuilt binary:
 
@@ -103,7 +123,8 @@ sudo apt install libopus-dev pkg-config libasound2-dev   # Debian/Ubuntu
 Without a system Opus, the build compiles the vendored C source instead, which needs
 autotools (`autoconf`, `automake`, `libtool`). Either way it takes a few minutes.
 
-However you install it, you need a microphone and speaker that run at 48000 Hz. On the first run your
+However you install it, you need a microphone and a speaker; any sample rate will do, since
+tincan resamples to and from the 48 kHz Opus works at. On the first run your
 operating system will ask for microphone permission — on macOS the prompt comes from the
 terminal app running tincan (Terminal, iTerm, VS Code…), not from tincan itself.
 
@@ -254,6 +275,30 @@ fails, traffic flows through a relay — which cannot decrypt anything, it only 
 QUIC encrypts every connection end to end and verifies the other side's identity by
 public key.
 
+### What tincan depends on
+
+*Serverless* here means there is no tincan server: no account, no room registry, nothing
+this project runs, and no copy of your conversation anywhere but on the machines having
+it. It does not mean no infrastructure at all. tincan uses iroh's `N0` preset, which
+brings in three services operated by [Number Zero](https://n0.computer), the company
+behind iroh:
+
+- **Finding each other.** Addresses are published to and looked up from n0's pkarr relay
+  (`dns.iroh.link`) and its DNS. This is what makes a public key enough on its own —
+  whether it arrived as an invite code or was derived from a room name and passphrase.
+  Without it, neither resolves to anywhere you could connect to.
+- **Getting through the router.** n0's relay servers — `use1-1`, `usw1-1`, `euc1-1` and
+  `aps1-1` under `relay.n0.iroh.link` — are how two machines behind NATs learn each
+  other's external addresses.
+- **Carrying the traffic when that fails.** The same relays forward packets they have no
+  key for, because the QUIC session is established between the two peers rather than with
+  the relay.
+
+So, put plainly: no server holds your room and no server can hear it, but two people
+cannot currently find each other without n0's. If those services went away, new
+connections would stop working. Pointing tincan at a relay and a DNS server you run
+yourself is something iroh supports and tincan does not expose yet.
+
 ### What the microphone sends
 
 Before anything leaves the machine, the frame goes through
@@ -284,6 +329,11 @@ be replayed, and the coordinator spends no Argon2 work on connection attempts.
 
 The password is not for encryption but for **admission control** — QUIC already handles
 the encryption.
+
+What a relay can see is worth being exact about. It cannot read anything: the QUIC session
+runs between the two peers and the relay holds no key to it. It does see the shape of the
+traffic — which two public keys are talking, when, and how much — which is more than
+nothing if that pattern is the part you were hoping to keep to yourself.
 
 A room opened by name goes further: its coordinator key *is* `Argon2id(passphrase, room
 name)`, so the passphrase is the room's address as well as its lock. That is what makes
@@ -342,9 +392,10 @@ decisions and are not used in the product.
 
 - **The coordinator is a single point of failure.** If the host leaves, the room
   dissolves. Leader handover was deliberately left out of the MVP.
-- **48 kHz required.** There is no resampling; if your device runs at another rate tincan
-  says so plainly and falls back to text chat rather than producing broken audio in
-  silence.
+- **A device that reports no format cannot be opened.** Any sample rate works — capture
+  and playback are resampled to and from Opus's 48 kHz with cubic interpolation, 16 kHz
+  Bluetooth headsets included — but a device that will not say what format it runs at is
+  refused rather than guessed at, and tincan says so and falls back to text chat.
 - **Noise suppression costs 10 ms.** It is a fixed price on the capture path, paid
   whether or not there is any noise to remove, and it is the reason the switch exists.
   `n` on the settings screen gives the 10 ms back.
@@ -372,6 +423,11 @@ decisions and are not used in the product.
 - **Push-to-talk is not hold-to-talk.** Terminals generally do not report key-release
   events, so in `--ptt` mode F4 works as a toggle: press once to open the microphone,
   press again to close it.
+- **Finding each other depends on n0's public infrastructure.** Discovery and hole
+  punching both go through servers run by Number Zero, set out under
+  [What tincan depends on](#what-tincan-depends-on). This holds even for two machines on
+  the same network: the preset tincan uses carries no local discovery, so a room does not
+  form without an internet connection. None of it is configurable yet.
 - **The first second of a connection flows through a relay** before switching to a direct
   link. You may notice the latency in the first moments after joining.
 

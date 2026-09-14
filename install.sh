@@ -62,6 +62,22 @@ detect_target() {
 # ── Fallback: build from source ─────────────────────────────────────────────
 
 build_from_source() {
+    # Git Bash, MSYS and Cygwin all land here, because this script installs a
+    # Unix binary into a Unix path. There is a Windows build; it is just not
+    # this script's to install.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            printf '\n' >&2
+            warn "this installer does not cover Windows, but there is a Windows build."
+            say "  Either of these will get it:" >&2
+            say "" >&2
+            say "      npx tincan-cli host" >&2
+            say "      https://github.com/$REPO/releases/latest  (tincan-x86_64-pc-windows-msvc.zip)" >&2
+            printf '\n' >&2
+            exit 1
+            ;;
+    esac
+
     if ! command -v cargo >/dev/null 2>&1; then
         printf '\n' >&2
         warn "no prebuilt binary for this platform, and cargo is not installed."

@@ -61,7 +61,9 @@ proof and do not interoperate.
 - **QUIC TLS 1.3**: Every connection is encrypted using QUIC TLS 1.3 backed by Ed25519 public key pairs via Iroh (`src/net/endpoint.rs`).
 - **Invite Code = Public Key**: The 63-character invite code is the Base32 representation of the coordinator's public key.
 - **Room Name + Passphrase = Derived Key**: A room opened by name has a coordinator key derived from the two. Its addresses are published through pkarr under that key, and a joiner who derives the same key finds them through the same lookup an invite code uses.
-- **DERP Relay Privacy**: When direct P2P hole punching fails, traffic flows through encrypted DERP relays. Relays cannot read audio or text payloads because they lack decryption keys.
+- **Relay Privacy**: When direct P2P hole punching fails, traffic flows through n0's relay servers. A relay cannot read audio or text payloads because it holds no key to the QUIC session, which is established between the two peers rather than with it.
+- **Relay Metadata**: A relay does observe the shape of what it forwards — which two public keys are talking, when, and how much. The payload is private; the fact of the conversation is not.
+- **Dependency on Public Infrastructure**: Discovery (n0's pkarr relay and DNS) and hole punching (n0's relay servers) are third-party services, and tincan does not currently expose a way to substitute your own. Availability, not confidentiality, is what rests on them: without those services peers cannot find each other at all.
 
 ---
 
@@ -74,5 +76,7 @@ proof and do not interoperate.
 | **Wire Eavesdropping** | Low | QUIC TLS 1.3 encryption for streams & datagrams |
 | **Man-in-the-Middle** | Low | Iroh Ed25519 public key verification |
 | **Relay Tampering** | Low | E2E encrypted QUIC payload |
+| **Traffic Metadata at a Relay** | Accepted | Payload is sealed; who-talks-to-whom is not hidden |
+| **Loss of n0's Discovery or Relays** | Accepted | Availability only; no fallback or self-hosting yet |
 | **Rival Room / Takeover by a Passphrase Holder** (named rooms) | Accepted | Insider attack; use the invite code if it matters |
 | **Guessing a Named Room** | Low with a generated passphrase | ~44-bit four-word passphrase behind 64 MiB Argon2id |
