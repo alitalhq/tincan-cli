@@ -12,7 +12,16 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "macos")]
 const CANDIDATES: &[(&str, &[&str])] = &[("pbcopy", &[])];
 
-#[cfg(not(target_os = "macos"))]
+// `clip.exe` would be the shorter answer, but it decodes stdin as the machine's
+// local code page, which mangles anything outside it. PowerShell reads UTF-8 and
+// is present on every Windows that can run this.
+#[cfg(target_os = "windows")]
+const CANDIDATES: &[(&str, &[&str])] = &[(
+    "powershell",
+    &["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"],
+)];
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const CANDIDATES: &[(&str, &[&str])] = &[
     ("wl-copy", &[]),
     ("xclip", &["-selection", "clipboard"]),
@@ -45,4 +54,22 @@ fn try_copy(program: &str, args: &[&str], text: &str) -> bool {
     drop(stdin);
 
     written && child.wait().map(|status| status.success()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every platform has to name at least one tool, or `copy` can only ever
+    /// return false and the invite code silently never reaches the clipboard —
+    /// which is what Windows did before it had a branch of its own.
+    #[test]
+    fn this_platform_has_a_clipboard_tool() {
+        assert!(!CANDIDATES.is_empty());
+    }
+
+    #[test]
+    fn a_missing_tool_fails_quietly_rather_than_panicking() {
+        assert!(!try_copy("tincan-no-such-clipboard-tool", &[], "hello"));
+    }
 }
