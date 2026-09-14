@@ -189,6 +189,7 @@ tincan completions fish > ~/.config/fish/completions/tincan.fish # fish
 | `F4`                       | Push-to-talk (only in `--ptt` mode)           |
 | `F5`                       | Deafen: hear nobody (also closes your mic)    |
 | `F6` (or `Ctrl+,`)         | Open audio settings                           |
+| `n` (on that screen)       | Noise suppression on / off                    |
 | `F1`                       | Show the full invite code (and copy it)       |
 | `↑` / `↓`                  | Pick someone out of the roster                |
 | `←` / `→`                  | Turn that person down or up                   |
@@ -253,6 +254,27 @@ fails, traffic flows through a relay — which cannot decrypt anything, it only 
 QUIC encrypts every connection end to end and verifies the other side's identity by
 public key.
 
+### What the microphone sends
+
+Before anything leaves the machine, the frame goes through
+[RNNoise](https://jmvalin.ca/demo/rnnoise/) — a small recurrent network trained to tell
+speech from everything else. It takes out what a noise gate cannot: a fan, an air
+conditioner, the rain, the person typing while they talk. The gate decides *whether* you
+are speaking; this decides what you sound like when you are.
+
+It is on unless you turn it off, because a feature nobody finds is a feature nobody has.
+The switch is `n` on the audio settings screen (`F6`), and the choice is remembered.
+
+The cost is honest and worth stating: RNNoise is an overlap-add design, so it hands back
+the frame *before* the one just given to it. That is **10 ms of added latency on the
+capture path**, always, whether or not there is any noise to remove. Against tincan's
+20 ms frames and three-frame jitter buffer it is a small share of the total, and it buys
+a call where the other person can hear you over your own keyboard. Turn it off and the
+10 ms goes away along with the suppression.
+
+Only your own microphone is cleaned. Voices arriving from other people are played as they
+were sent, so the work is one stream no matter how many people are in the room.
+
 ## Security
 
 The password never travels over the wire. Both sides stretch it once with Argon2id into an
@@ -305,6 +327,7 @@ src/
     jitter.rs     Per-peer jitter buffer
     mixer.rs      Multi-source mixing + limiter
     vad.rs        Voice activity detection (indicator + DTX)
+    denoise.rs    RNNoise noise suppression on the capture path
   ui/
     state.rs      Interface state (independent of network and terminal, tested)
     view.rs       Screen layout
@@ -322,6 +345,9 @@ decisions and are not used in the product.
 - **48 kHz required.** There is no resampling; if your device runs at another rate tincan
   says so plainly and falls back to text chat rather than producing broken audio in
   silence.
+- **Noise suppression costs 10 ms.** It is a fixed price on the capture path, paid
+  whether or not there is any noise to remove, and it is the reason the switch exists.
+  `n` on the settings screen gives the 10 ms back.
 - **The invite code is 63 characters.** It cannot be shortened, because it is the public
   key itself — fine for copy and paste, not for reading down the phone. Open the room by
   name for an invite you can say out loud.

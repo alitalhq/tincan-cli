@@ -2,6 +2,7 @@
 
 pub mod blip;
 pub mod codec;
+pub mod denoise;
 pub mod device;
 pub mod jitter;
 pub mod mixer;
@@ -18,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::proto::PeerId;
 use blip::Blip;
+use denoise::Denoiser;
 use device::{AudioDevices, AudioHealth};
 use jitter::{Frame, JitterBuffer};
 use mixer::Mixer;
@@ -124,6 +126,11 @@ pub struct VoiceIo {
     /// `f32::to_bits`. The interface writes it and the capture loop reads it, so the
     /// user can drag the gate while the detector is running.
     pub gate: Arc<AtomicU32>,
+    /// Whether the microphone is cleaned up before anything else sees it. Read
+    /// once per frame rather than captured when the loop was built, so that
+    /// switching it on the settings screen takes effect without reopening the
+    /// device.
+    pub denoise: Arc<AtomicBool>,
     pub health: Arc<AudioHealth>,
     pub blip_tx: mpsc::Sender<Blip>,
     /// The audio hardware stays open for as long as this is kept alive.
@@ -148,6 +155,7 @@ pub fn start(me: PeerId, choice: &device::DeviceChoice) -> Result<VoiceIo> {
     ));
     let mic_open = Arc::new(AtomicBool::new(true));
     let hearing = Arc::new(AtomicBool::new(true));
+    let denoise = Arc::new(AtomicBool::new(true));
     let mic_test = Arc::new(AtomicU8::new(MicTest::Off.bits()));
 
     // ── Capture: microphone → VAD → Opus → network ──────────────────────────
@@ -155,6 +163,7 @@ pub fn start(me: PeerId, choice: &device::DeviceChoice) -> Result<VoiceIo> {
     let capture_speaking = speaking_tx.clone();
     let capture_test = mic_test.clone();
     let capture_gate = gate.clone();
+    let capture_denoise = denoise.clone();
     tokio::spawn(async move {
         let mut encoder = match codec::Encoder::new() {
             Ok(encoder) => encoder,
@@ -164,6 +173,9 @@ pub fn start(me: PeerId, choice: &device::DeviceChoice) -> Result<VoiceIo> {
             }
         };
         let mut detector = Vad::default();
+        // Built whether or not it is switched on, so that turning it on mid-call
+        // costs nothing and does not allocate on the audio path.
+        let mut denoiser = Denoiser::new();
         let mut pcm = vec![0f32; FRAME];
         let mut ticker = tokio::time::interval(FRAME_DURATION);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -176,6 +188,16 @@ pub fn start(me: PeerId, choice: &device::DeviceChoice) -> Result<VoiceIo> {
             while capture.slots() >= FRAME {
                 for slot in pcm.iter_mut() {
                     *slot = capture.pop().unwrap_or(0.0);
+                }
+
+                // Everything downstream — the meter, the gate, the microphone
+                // test, the encoder — works on the cleaned frame. The meter
+                // should show the level the other side actually hears, the gate
+                // should sit on top of the cleaned noise floor rather than the
+                // raw one, and someone running the microphone test is listening
+                // for the improvement itself.
+                if capture_denoise.load(Ordering::Relaxed) {
+                    denoiser.process(&mut pcm);
                 }
 
                 // Only publish a level the meter could actually draw differently.
@@ -411,6 +433,7 @@ pub fn start(me: PeerId, choice: &device::DeviceChoice) -> Result<VoiceIo> {
         peer_gains: peer_gains_tx,
         mic_test,
         gate,
+        denoise,
         health,
         blip_tx,
         devices,
