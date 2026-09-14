@@ -163,6 +163,8 @@ pub struct App {
     pub mic_level: f32,
     /// Whether typing makes a sound.
     pub typing_clicks: bool,
+    /// Whether the microphone is cleaned up before anyone else hears it.
+    pub denoise: bool,
     /// How loud that sound is, 0.0 to 1.0.
     pub typing_volume: f32,
     /// What the microphone test is doing.
@@ -224,6 +226,7 @@ impl App {
             active_output_name: None,
             mic_level: 0.0,
             typing_clicks: false,
+            denoise: true,
             typing_volume: crate::config::DEFAULT_TYPING_VOLUME,
             mic_test: MicTest::Off,
             mic_test_until: None,
@@ -606,6 +609,11 @@ impl App {
     /// Whether the microphone is currently loud enough to be sent.
     pub fn gate_open(&self) -> bool {
         self.mic_level > self.input_gate
+    }
+
+    /// Turns noise suppression on or off.
+    pub fn toggle_denoise(&mut self) {
+        self.denoise = !self.denoise;
     }
 
     /// Turns key clicks on or off.

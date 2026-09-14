@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +45,8 @@ jobs:
       - run: cargo test --locked
 
   # The branch ruleset needs one status check whose name never moves. The matrix
-  # jobs report as `test (ubuntu-latest)` / `test (macos-14)`, so requiring those
-  # directly would break the rule the moment the matrix gains or renames an OS.
+  # jobs report as `test (ubuntu-latest)`, `test (macos-15)` and so on, so requiring
+  # those directly would break the rule the moment the matrix gains or renames an OS.
   # This job is that fixed name, and it is nothing but a verdict on the matrix.
   gate:
     name: build/test/ci

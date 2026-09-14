@@ -34,7 +34,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Constraint::Length(problem),
         Constraint::Max(rows_for(app.input_devices.len())),
         Constraint::Max(rows_for(app.output_devices.len())),
-        Constraint::Length(6),
+        Constraint::Length(7),
         Constraint::Length(4),
         Constraint::Min(0),
     ])
@@ -315,8 +315,21 @@ fn test_rows(width: u16, app: &App, theme: &Theme) -> Vec<TextLine<'static>> {
         ],
     };
 
+    let (clean, clean_style) = if app.denoise {
+        ("on", theme.ok())
+    } else {
+        ("off", theme.dim())
+    };
+
     vec![
         spread(width, floor, offer),
+        TextLine::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{:<5}", "n"), theme.accent()),
+            Span::raw("  "),
+            Span::styled(format!("{:<21}", "clean up the room"), theme.text()),
+            Span::styled(clip(clean, room, theme), clean_style),
+        ]),
         spread(
             width,
             vec![
@@ -337,6 +350,15 @@ fn test_rows(width: u16, app: &App, theme: &Theme) -> Vec<TextLine<'static>> {
         TextLine::from(""),
         TextLine::from(meter(width, app, theme)),
     ]
+}
+
+/// Which row of `test_rows` is which. The tests reach for them by position, so
+/// adding a row in the middle is otherwise a silent renumbering.
+#[cfg(test)]
+mod rows {
+    pub const FLOOR: usize = 0;
+    pub const DENOISE: usize = 1;
+    pub const MIC_TEST: usize = 2;
 }
 
 /// The live level with the noise floor marked on it.
@@ -528,11 +550,11 @@ mod tests {
         let mut app = app();
 
         app.toggle_recorded_test();
-        assert!(text(&test_rows(70, &app, &theme)[1]).contains("recording"));
+        assert!(text(&test_rows(70, &app, &theme)[rows::MIC_TEST]).contains("recording"));
 
         app.mic_test_until = Some(std::time::Instant::now());
         app.advance_mic_test();
-        assert!(text(&test_rows(70, &app, &theme)[1]).contains("playing it back"));
+        assert!(text(&test_rows(70, &app, &theme)[rows::MIC_TEST]).contains("playing it back"));
     }
 
     #[test]
@@ -543,7 +565,7 @@ mod tests {
         let mut app = app();
         app.fed_back = true;
 
-        let row = text(&test_rows(90, &app, &theme)[1]);
+        let row = text(&test_rows(90, &app, &theme)[rows::MIC_TEST]);
         assert!(row.contains("fed back"), "{row}");
         assert!(row.contains("headphones"), "it has to say what to do about it: {row}");
         assert!(
@@ -556,11 +578,11 @@ mod tests {
     fn live_monitoring_is_offered_only_while_nothing_is_running() {
         let theme = Theme::from_env();
         let mut app = app();
-        assert!(text(&test_rows(90, &app, &theme)[1]).contains("listen live"));
+        assert!(text(&test_rows(90, &app, &theme)[rows::MIC_TEST]).contains("listen live"));
 
         app.toggle_recorded_test();
         assert!(
-            !text(&test_rows(90, &app, &theme)[1]).contains("listen live"),
+            !text(&test_rows(90, &app, &theme)[rows::MIC_TEST]).contains("listen live"),
             "one thing at a time"
         );
     }
@@ -601,12 +623,12 @@ mod tests {
     fn the_floor_row_says_where_it_is_set() {
         let mut app = app();
         app.input_gate = 0.25;
-        let row = text(&test_rows(70, &app, &Theme::from_env())[0]);
+        let row = text(&test_rows(70, &app, &Theme::from_env())[rows::FLOOR]);
         assert!(row.contains("25%"), "{row}");
         assert!(row.contains("measure the room"), "{row}");
 
         app.input_gate = 0.0;
-        let off = text(&test_rows(70, &app, &Theme::from_env())[0]);
+        let off = text(&test_rows(70, &app, &Theme::from_env())[rows::FLOOR]);
         assert!(off.contains("nothing is ignored"), "{off}");
     }
 
@@ -614,19 +636,34 @@ mod tests {
     fn a_measurement_in_progress_says_what_it_is_doing() {
         let mut app = app();
         app.start_calibration();
-        let row = text(&test_rows(70, &app, &Theme::from_env())[0]);
+        let row = text(&test_rows(70, &app, &Theme::from_env())[rows::FLOOR]);
         assert!(row.contains("listening to the room"), "{row}");
         assert!(drawn(&app).contains("hold still"), "{}", drawn(&app));
+    }
+
+    #[test]
+    fn the_microphone_section_says_whether_it_is_cleaning_up() {
+        let mut app = app();
+        let theme = Theme::from_env();
+
+        let row = text(&test_rows(70, &app, &theme)[rows::DENOISE]);
+        assert!(row.contains("clean up the room"), "{row}");
+        assert!(row.contains("on"), "it starts on and has to say so: {row}");
+        assert!(row.trim_start().starts_with('n'), "and name its key: {row}");
+
+        app.toggle_denoise();
+        let row = text(&test_rows(70, &app, &theme)[rows::DENOISE]);
+        assert!(row.contains("off"), "{row}");
     }
 
     #[test]
     fn the_test_names_its_own_state() {
         let mut app = app();
         let theme = Theme::from_env();
-        assert!(text(&test_rows(60, &app, &theme)[1]).contains("ready"));
+        assert!(text(&test_rows(60, &app, &theme)[rows::MIC_TEST]).contains("ready"));
 
         app.toggle_monitor();
-        let row = text(&test_rows(60, &app, &theme)[1]);
+        let row = text(&test_rows(60, &app, &theme)[rows::MIC_TEST]);
         assert!(row.contains("listen live"), "the row names the control that is running: {row}");
         assert!(row.trim_start().starts_with('m'), "and the key that stops it: {row}");
         for width in [30, 40, 53, 80] {

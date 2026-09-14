@@ -402,6 +402,7 @@ fn setup_voice(
                 peer_gains: io.peer_gains,
                 mic_test: io.mic_test,
                 gate: io.gate,
+                denoise: io.denoise,
                 health: io.health,
                 blip_tx: io.blip_tx,
                 devices: io.devices,

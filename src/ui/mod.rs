@@ -46,6 +46,8 @@ pub struct VoiceControl {
     pub mic_test: Arc<AtomicU8>,
     /// The microphone's noise floor, as the capture loop reads it.
     pub gate: Arc<AtomicU32>,
+    /// Whether the capture loop cleans the microphone up before anyone hears it.
+    pub denoise: Arc<AtomicBool>,
     pub health: Arc<AudioHealth>,
     pub blip_tx: mpsc::Sender<Blip>,
     /// The audio hardware stays open for as long as this is kept alive.
@@ -75,6 +77,13 @@ impl VoiceControl {
     pub fn set_gate(&self, level: f32) {
         self.gate
             .store(crate::audio::rms_for(level).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Switches noise suppression on or off. It takes effect on the next frame:
+    /// the capture loop reads this rather than holding a copy, so nothing has to
+    /// be torn down and the microphone does not glitch.
+    pub fn set_denoise(&self, on: bool) {
+        self.denoise.store(on, Ordering::Relaxed);
     }
 
     /// Hands the engine the volume you have set for each person.
@@ -172,6 +181,7 @@ pub async fn run(
     app.ptt_mode = ptt_mode && app.voice_available;
     app.motion = theme.motion;
     app.typing_clicks = config.typing_clicks;
+    app.denoise = config.denoise;
     app.typing_volume = config.typing_loudness();
     if let Some(voice) = voice.as_ref() {
         // The rail names the microphone and speaker in use from the first frame, so
@@ -181,6 +191,10 @@ pub async fn run(
         app.active_output_name = voice.active_output();
         app.input_gate = config.gate_for(app.active_input_name.as_deref());
         voice.set_gate(app.input_gate);
+        // The engine starts with suppression on. Someone who turned it off last
+        // time has to have that honoured before the first frame, not on their
+        // next visit to the settings screen.
+        voice.set_denoise(app.denoise);
     }
     let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
     let _mouse_guard = MouseCaptureGuard;
@@ -479,6 +493,17 @@ async fn handle_key(
                 }
                 return Ok(false);
             }
+            // Noise suppression belongs to the microphone as a whole rather than
+            // to one focused row, so it takes a key of its own the way live
+            // monitoring does, and works from anywhere on the screen.
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.toggle_denoise();
+                if let Some(v) = voice {
+                    v.set_denoise(app.denoise);
+                }
+                remember_settings(app);
+                return Ok(false);
+            }
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 app.refresh_devices();
                 return Ok(false);
@@ -506,6 +531,7 @@ async fn handle_key(
                                         v.set_gate(app.input_gate);
                                         cfg.input_device = Some(activated);
                                         cfg.typing_clicks = app.typing_clicks;
+                                        cfg.denoise = app.denoise;
                                         cfg.typing_volume = Some(app.typing_volume);
                                         let _ = cfg.save();
                                     }
@@ -533,6 +559,7 @@ async fn handle_key(
                                         let mut cfg = Config::load();
                                         cfg.output_device = Some(activated);
                                         cfg.typing_clicks = app.typing_clicks;
+                                        cfg.denoise = app.denoise;
                                         cfg.typing_volume = Some(app.typing_volume);
                                         let _ = cfg.save();
                                     }
@@ -750,6 +777,10 @@ pub(crate) fn remember_settings_into(app: &App, mut config: Config) -> (Config, 
         changed = true;
     }
 
+    if config.denoise != app.denoise {
+        config.denoise = app.denoise;
+        changed = true;
+    }
     if config.typing_clicks != app.typing_clicks {
         config.typing_clicks = app.typing_clicks;
         changed = true;
@@ -1215,6 +1246,61 @@ mod tests {
 
         let (_updated, changed) = remember_settings_into(&app, config);
         assert!(!changed);
+    }
+
+    #[test]
+    fn remember_settings_persists_noise_suppression_being_turned_off() {
+        let mut app = test_chat_app(20);
+        app.active_input_name = None;
+        app.denoise = false;
+
+        let (updated, changed) = remember_settings_into(&app, Config::default());
+
+        assert!(changed, "turning it off is a change worth writing down");
+        assert!(!updated.denoise);
+    }
+
+    #[test]
+    fn leaving_noise_suppression_on_writes_nothing() {
+        let mut app = test_chat_app(20);
+        app.active_input_name = None;
+
+        let (_updated, changed) = remember_settings_into(&app, Config::default());
+
+        assert!(
+            !changed,
+            "the default agrees with the state, so there is nothing to save"
+        );
+    }
+
+    #[tokio::test]
+    async fn n_toggles_noise_suppression_from_anywhere_in_settings() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let mut app = test_chat_app(20);
+        app.view_mode = ViewMode::Settings;
+        // Deliberately not the microphone section: the key is screen-wide, the
+        // way live monitoring and rescanning are.
+        app.settings_section = SettingsSection::Typing;
+        assert!(app.denoise, "it starts on");
+
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        handle_key(&mut app, n, &cmd_tx, None).await.unwrap();
+        assert!(!app.denoise);
+
+        handle_key(&mut app, n, &cmd_tx, None).await.unwrap();
+        assert!(app.denoise, "and comes back");
+    }
+
+    #[tokio::test]
+    async fn n_types_a_letter_in_the_chat_view() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let mut app = test_chat_app(20);
+
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        handle_key(&mut app, n, &cmd_tx, None).await.unwrap();
+
+        assert_eq!(app.input, "n", "the binding belongs to the settings screen only");
+        assert!(app.denoise);
     }
 
     #[tokio::test]
