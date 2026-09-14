@@ -1,6 +1,8 @@
 # Tincan CLI Wiki & Technical Documentation Portal
 
-Welcome to the official **Tincan CLI** Technical Wiki. Tincan is a serverless, peer-to-peer (P2P) voice and text chat client engineered for the terminal. It delivers multi-channel group communication without requiring central servers, user accounts, or third-party infrastructure.
+Welcome to the official **Tincan CLI** Technical Wiki. Tincan is a serverless, peer-to-peer (P2P) voice and text chat client engineered for the terminal. It delivers multi-channel group communication without a server of its own and without user accounts: no room state, and no copy of a conversation, exists anywhere but on the machines taking part.
+
+Peers still have to find each other and get through their routers, and for that tincan relies on the public iroh infrastructure run by [Number Zero](https://n0.computer) — described in full under [What tincan depends on](../README.md#what-tincan-depends-on).
 
 ---
 
