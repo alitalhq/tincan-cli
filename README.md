@@ -253,6 +253,30 @@ fails, traffic flows through a relay — which cannot decrypt anything, it only 
 QUIC encrypts every connection end to end and verifies the other side's identity by
 public key.
 
+### What tincan depends on
+
+*Serverless* here means there is no tincan server: no account, no room registry, nothing
+this project runs, and no copy of your conversation anywhere but on the machines having
+it. It does not mean no infrastructure at all. tincan uses iroh's `N0` preset, which
+brings in three services operated by [Number Zero](https://n0.computer), the company
+behind iroh:
+
+- **Finding each other.** Addresses are published to and looked up from n0's pkarr relay
+  (`dns.iroh.link`) and its DNS. This is what makes a public key enough on its own —
+  whether it arrived as an invite code or was derived from a room name and passphrase.
+  Without it, neither resolves to anywhere you could connect to.
+- **Getting through the router.** n0's relay servers — `use1-1`, `usw1-1`, `euc1-1` and
+  `aps1-1` under `relay.n0.iroh.link` — are how two machines behind NATs learn each
+  other's external addresses.
+- **Carrying the traffic when that fails.** The same relays forward packets they have no
+  key for, because the QUIC session is established between the two peers rather than with
+  the relay.
+
+So, put plainly: no server holds your room and no server can hear it, but two people
+cannot currently find each other without n0's. If those services went away, new
+connections would stop working. Pointing tincan at a relay and a DNS server you run
+yourself is something iroh supports and tincan does not expose yet.
+
 ## Security
 
 The password never travels over the wire. Both sides stretch it once with Argon2id into an
@@ -262,6 +286,11 @@ be replayed, and the coordinator spends no Argon2 work on connection attempts.
 
 The password is not for encryption but for **admission control** — QUIC already handles
 the encryption.
+
+What a relay can see is worth being exact about. It cannot read anything: the QUIC session
+runs between the two peers and the relay holds no key to it. It does see the shape of the
+traffic — which two public keys are talking, when, and how much — which is more than
+nothing if that pattern is the part you were hoping to keep to yourself.
 
 A room opened by name goes further: its coordinator key *is* `Argon2id(passphrase, room
 name)`, so the passphrase is the room's address as well as its lock. That is what makes
@@ -346,6 +375,11 @@ decisions and are not used in the product.
 - **Push-to-talk is not hold-to-talk.** Terminals generally do not report key-release
   events, so in `--ptt` mode F4 works as a toggle: press once to open the microphone,
   press again to close it.
+- **Finding each other depends on n0's public infrastructure.** Discovery and hole
+  punching both go through servers run by Number Zero, set out under
+  [What tincan depends on](#what-tincan-depends-on). This holds even for two machines on
+  the same network: the preset tincan uses carries no local discovery, so a room does not
+  form without an internet connection. None of it is configurable yet.
 - **The first second of a connection flows through a relay** before switching to a direct
   link. You may notice the latency in the first moments after joining.
 

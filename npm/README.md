@@ -27,7 +27,7 @@ tincan join <INVITE-CODE> --name bob
 
 ## Features
 
-- **P2P & Serverless**: Runs directly over QUIC and encrypted WebRTC/Iroh mesh connections. No central servers, no user accounts.
+- **P2P & Serverless**: Voice and chat run peer to peer over QUIC through [iroh](https://iroh.computer). No accounts, and no server of ours holds your room — though finding peers and getting through NATs does rely on iroh's public infrastructure, run by Number Zero ([details](https://github.com/bilalyazicioglu/tincan-cli#what-tincan-depends-on)).
 - **Low-Latency Voice**: 48 kHz Opus audio with per-peer jitter buffering and DTX silence suppression.
 - **Terminal UI**: Metallic rust theme, live VU meters, and travelling pulse latency visualizations.
 - **Zero Config**: NAT traversal and relay fallbacks work globally out-of-the-box.
