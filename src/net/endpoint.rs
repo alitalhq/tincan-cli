@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use iroh::address_lookup::MemoryLookup;
-use iroh::{Endpoint, EndpointId, RelayMode, endpoint::presets};
+use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets};
 
 use crate::proto::{self, PeerId};
 
@@ -10,10 +10,19 @@ use crate::proto::{self, PeerId};
 ///
 /// `presets::N0` brings in n0's public relays for hole punching plus DNS discovery,
 /// which is what makes the invite code sufficient on its own — no address list needed.
-pub async fn bind() -> Result<Endpoint> {
-    let endpoint = Endpoint::builder(presets::N0)
+///
+/// `identity` is `None` for a fresh key, which is what joiners and rooms reached by invite
+/// code use. A room opened by name passes its derived key instead: the preset's pkarr
+/// publisher then announces this endpoint's addresses under it, and a joiner who derives
+/// the same key finds them through the same lookup an invite code goes through.
+pub async fn bind(identity: Option<SecretKey>) -> Result<Endpoint> {
+    let mut builder = Endpoint::builder(presets::N0)
         .alpns(vec![proto::ALPN.to_vec(), proto::VOICE_ALPN.to_vec()])
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Default);
+    if let Some(identity) = identity {
+        builder = builder.secret_key(identity);
+    }
+    let endpoint = builder
         .bind()
         .await
         .context("could not open the network interface")?;
@@ -27,7 +36,13 @@ pub async fn bind() -> Result<Endpoint> {
 /// depending on the internet or on n0's servers. Identity alone is not enough to
 /// connect here — the full `EndpointAddr` has to be supplied.
 pub async fn bind_offline() -> Result<Endpoint> {
+    bind_offline_as(SecretKey::generate()).await
+}
+
+/// For tests: an offline endpoint with a chosen identity, as a room opened by name has.
+pub async fn bind_offline_as(identity: SecretKey) -> Result<Endpoint> {
     Endpoint::builder(presets::Minimal)
+        .secret_key(identity)
         .alpns(vec![proto::ALPN.to_vec(), proto::VOICE_ALPN.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()

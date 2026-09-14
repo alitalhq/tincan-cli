@@ -4,8 +4,10 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use iroh::EndpointAddr;
+use tincan::auth::{Admission, Key, RoomSecret};
 use tincan::net::control::{Client, Coordinator};
-use tincan::net::endpoint::bind_offline;
+use tincan::net::endpoint::{bind, bind_offline, bind_offline_as, to_endpoint_id, to_peer_id};
 use tincan::net::{Command, Event, Session};
 use tincan::proto::{ChannelId, PeerInfo};
 use tincan::room::Room;
@@ -15,6 +17,16 @@ const PATIENCE: Duration = Duration::from_secs(10);
 
 fn test_room() -> Room {
     Room::new("test room", vec!["general".into(), "gaming".into()]).unwrap()
+}
+
+/// What a coordinator at `addr` lets in, for a room reached by its invite code.
+fn admits(addr: &EndpointAddr, password: &str) -> Admission {
+    Admission::invite(password, &to_peer_id(addr.id)).unwrap()
+}
+
+/// The key a joiner holding the invite code for `addr` proves itself with.
+fn key_for(addr: &EndpointAddr, password: &str) -> Key {
+    Key::for_invite(password, &to_peer_id(addr.id)).unwrap()
 }
 
 /// Waits for the first event matching a predicate, swallowing the others on the way.
@@ -61,7 +73,7 @@ async fn wait_for_chat(session: &mut Session, text: &str) -> Result<()> {
 async fn peer_joins_and_both_sides_converge() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), "password".into(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, "password"), "alice", None).await?;
 
     let welcome = wait_for(&mut host, "host welcome", |e| match e {
         Event::Welcome { room, .. } => Some(room),
@@ -72,7 +84,7 @@ async fn peer_joins_and_both_sides_converge() -> Result<()> {
     assert_eq!(welcome.channels, vec!["general", "gaming"]);
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "password", "bob", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, "password"), "bob", None).await?;
 
     let guest_welcome = wait_for(&mut guest, "guest welcome", |e| match e {
         Event::Welcome { room, .. } => Some(room),
@@ -96,15 +108,79 @@ async fn peer_joins_and_both_sides_converge() -> Result<()> {
     Ok(())
 }
 
+/// A room opened by name: the joiner derives the host's address from the name and the
+/// passphrase alone, and the invite code still gets in too.
+#[tokio::test]
+async fn a_room_opened_by_name_is_reached_by_name_and_by_code() -> Result<()> {
+    let passphrase = "chestnut-ferry-lens-moss";
+    let secret = RoomSecret::derive("lobby", passphrase)?;
+    let host_ep = bind_offline_as(secret.identity()).await?;
+    let host_addr = host_ep.addr();
+    let admission = Admission::room(&secret, passphrase)?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admission, "alice", None).await?;
+
+    // Typed differently, derived on the other machine: the same address.
+    let joiner = RoomSecret::derive("Lobby", "Chestnut Ferry Lens Moss")?;
+    assert_eq!(to_peer_id(host_addr.id), joiner.coordinator());
+
+    let mut by_name = Client::connect(bind_offline().await?, host_addr.clone(), joiner.key(), "bob", None).await?;
+    wait_for(&mut by_name, "welcome by name", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
+
+    let by_code_key = key_for(&host_addr, passphrase);
+    let mut by_code = Client::connect(bind_offline().await?, host_addr.clone(), &by_code_key, "carol", None).await?;
+    wait_for(&mut by_code, "welcome by code", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
+
+    wait_for_roster(&mut host, 3).await?;
+
+    let wrong = RoomSecret::derive("lobby", "chestnut-ferry-lens-mess")?;
+    assert_ne!(wrong.coordinator(), secret.coordinator(), "a wrong passphrase is a different address");
+    let refused = Client::connect(bind_offline().await?, host_addr, wrong.key(), "mallory", None).await;
+    let err = refused.err().expect("a wrong passphrase must not be accepted").to_string();
+    assert!(err.contains("password"), "the error must point at the password: {err}");
+    Ok(())
+}
+
+/// Over the real network: a room opened by name is found from the name and passphrase
+/// alone, through the address records its derived key publishes.
+#[tokio::test]
+#[ignore = "needs the internet and n0's discovery servers"]
+async fn a_named_room_is_found_over_the_network() -> Result<()> {
+    // A made-up name, so the test never lands in somebody's real room.
+    let room = format!("test-{}", tincan::passphrase::generate());
+    let passphrase = tincan::passphrase::generate();
+
+    let secret = RoomSecret::derive(&room, &passphrase)?;
+    let admission = Admission::room(&secret, &passphrase)?;
+    let mut host = Coordinator::spawn(bind(Some(secret.identity())).await?, test_room(), admission, "alice", None).await?;
+
+    let joiner = RoomSecret::derive(&room, &passphrase)?;
+    let target = to_endpoint_id(&joiner.coordinator())?;
+    // Publishing the host's addresses takes a moment; until then the lookup finds nothing.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut guest = loop {
+        match Client::connect(bind(None).await?, target, joiner.key(), "bob", None).await {
+            Ok(session) => break session,
+            Err(err) if tokio::time::Instant::now() < deadline => {
+                eprintln!("not found yet, retrying: {err:#}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    };
+    wait_for(&mut guest, "welcome by name", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
+    wait_for_roster(&mut host, 2).await?;
+    Ok(())
+}
+
 /// An attempt with the wrong password must be rejected during the handshake.
 #[tokio::test]
 async fn wrong_password_is_refused() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let _host = Coordinator::spawn(host_ep, test_room(), "right-password".into(), "alice", None).await?;
+    let _host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, "right-password"), "alice", None).await?;
 
     let guest_ep = bind_offline().await?;
-    let result = Client::connect(guest_ep, host_addr, "wrong-password", "uninvited", None).await;
+    let result = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, "wrong-password"), "uninvited", None).await;
 
     let err = result.err().expect("a wrong password must not be accepted").to_string();
     assert!(err.contains("password"), "the error must point at the password: {err}");
@@ -116,11 +192,11 @@ async fn wrong_password_is_refused() -> Result<()> {
 async fn chat_reaches_everyone_including_the_sender() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "", "bob", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, ""), "bob", None).await?;
     wait_for(&mut guest, "guest welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 2).await?;
 
@@ -152,11 +228,11 @@ async fn chat_reaches_everyone_including_the_sender() -> Result<()> {
 async fn channel_switch_is_visible_to_everyone() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "", "bob", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, ""), "bob", None).await?;
     let guest_id = guest.me;
     wait_for(&mut guest, "guest welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 2).await?;
@@ -193,11 +269,11 @@ async fn channel_switch_is_visible_to_everyone() -> Result<()> {
 async fn invalid_channel_request_is_ignored_without_breaking_the_session() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "", "bob", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, ""), "bob", None).await?;
     wait_for(&mut guest, "guest welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 2).await?;
 
@@ -223,11 +299,11 @@ async fn invalid_channel_request_is_ignored_without_breaking_the_session() -> Re
 async fn leaving_updates_the_roster() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "", "bob", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, ""), "bob", None).await?;
     wait_for(&mut guest, "guest welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 2).await?;
 
@@ -244,11 +320,11 @@ async fn leaving_updates_the_roster() -> Result<()> {
 async fn duplicate_nicknames_are_disambiguated_over_the_wire() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "", "alice", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, ""), "alice", None).await?;
     wait_for(&mut guest, "guest welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let roster = wait_for_roster(&mut host, 2).await?;
@@ -263,14 +339,14 @@ async fn duplicate_nicknames_are_disambiguated_over_the_wire() -> Result<()> {
 async fn three_participants_stay_in_sync() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
-    let mut first = Client::connect(bind_offline().await?, host_addr.clone(), "", "bob", None).await?;
+    let mut first = Client::connect(bind_offline().await?, host_addr.clone(), &key_for(&host_addr, ""), "bob", None).await?;
     wait_for(&mut first, "welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 2).await?;
 
-    let mut second = Client::connect(bind_offline().await?, host_addr, "", "carol", None).await?;
+    let mut second = Client::connect(bind_offline().await?, host_addr.clone(), &key_for(&host_addr, ""), "carol", None).await?;
     wait_for(&mut second, "welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 3).await?;
 
@@ -293,11 +369,11 @@ async fn three_participants_stay_in_sync() -> Result<()> {
 async fn host_quitting_notifies_and_gracefully_disconnects_guest() -> Result<()> {
     let host_ep = bind_offline().await?;
     let host_addr = host_ep.addr();
-    let mut host = Coordinator::spawn(host_ep, test_room(), String::new(), "alice", None).await?;
+    let mut host = Coordinator::spawn(host_ep, test_room(), admits(&host_addr, ""), "alice", None).await?;
     wait_for(&mut host, "host welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
 
     let guest_ep = bind_offline().await?;
-    let mut guest = Client::connect(guest_ep, host_addr, "", "bob", None).await?;
+    let mut guest = Client::connect(guest_ep, host_addr.clone(), &key_for(&host_addr, ""), "bob", None).await?;
     wait_for(&mut guest, "guest welcome", |e| matches!(e, Event::Welcome { .. }).then_some(())).await?;
     wait_for_roster(&mut host, 2).await?;
 

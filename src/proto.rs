@@ -9,7 +9,10 @@
 use serde::{Deserialize, Serialize};
 
 /// The ALPN used on the control stream.
-pub const ALPN: &[u8] = b"tincan/control/0";
+///
+/// Version 1: the password proof became a MAC under an Argon2id-stretched key. A /0 peer
+/// would fail the handshake with a misleading "wrong password", so the two do not meet.
+pub const ALPN: &[u8] = b"tincan/control/1";
 
 /// The ALPN used in the voice mesh. Separate from the control plane: voice links are
 /// established directly between peers and never pass through the coordinator.
@@ -130,7 +133,7 @@ pub struct ChatLine {
 /// Client → coordinator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToCoordinator {
-    /// Answer to the challenge: nickname + password proof.
+    /// Answer to the challenge: nickname + `MAC(admission key, nonce)`.
     Hello { name: String, proof: [u8; 32] },
     /// Switch voice channel; `None` means leave voice entirely.
     SwitchChannel { channel: Option<ChannelId> },

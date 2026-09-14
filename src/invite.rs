@@ -4,6 +4,9 @@
 //! the identity itself. All we can do is make it readable: base32 instead of hex
 //! (64 → 52 characters), split into groups, and forgiving about formatting on the way
 //! back in.
+//!
+//! A room opened by name and passphrase (see `auth`) does not need the code at all; this
+//! remains the way in whose security does not rest on a passphrase.
 
 use anyhow::{Result, bail};
 use data_encoding::BASE32_NOPAD;
@@ -23,6 +26,21 @@ pub fn encode(key: &[u8; 32]) -> String {
         .join("-")
 }
 
+/// Whether `text` is meant as an invite code rather than a room name.
+///
+/// Only the shape is checked — 52 ASCII letters and digits once the formatting is gone —
+/// so that a code with a typo still lands in `decode` and gets told what is wrong with it,
+/// instead of being taken for a room name. Room names are capped below 52 characters, so
+/// no room name can pass.
+pub fn looks_like_code(text: &str) -> bool {
+    let kept: Vec<char> = text.chars().filter(|c| !is_formatting(*c)).collect();
+    kept.len() == CODE_CHARS && kept.iter().all(char::is_ascii_alphanumeric)
+}
+
+fn is_formatting(c: char) -> bool {
+    c.is_whitespace() || c == '-' || c == '_'
+}
+
 /// Turns a code back into an identity.
 ///
 /// People copy the code out of a chat app and paste it, so dashes, spaces, line breaks
@@ -30,7 +48,7 @@ pub fn encode(key: &[u8; 32]) -> String {
 pub fn decode(code: &str) -> Result<[u8; 32]> {
     let cleaned: String = code
         .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .filter(|c| !is_formatting(*c))
         .flat_map(|c| c.to_uppercase())
         .collect();
 
@@ -100,6 +118,19 @@ mod tests {
         for variant in variants {
             assert_eq!(decode(&variant).unwrap(), original, "failed on: {variant:?}");
         }
+    }
+
+    #[test]
+    fn codes_and_room_names_are_told_apart() {
+        let code = encode(&key(5));
+        assert!(looks_like_code(&code));
+        assert!(looks_like_code(&code.to_uppercase().replace('-', " ")));
+        // A typo is still a code, so that decoding can say what is wrong with it.
+        assert!(looks_like_code(&format!("1118{}", &code[4..])));
+
+        assert!(!looks_like_code("lobby"));
+        assert!(!looks_like_code(&"a".repeat(crate::auth::MAX_ROOM_CHARS)));
+        assert!(!looks_like_code(&"ş".repeat(CODE_CHARS)), "only ASCII can be a code");
     }
 
     #[test]

@@ -4195,11 +4195,12 @@ dependencies = [
 
 [[package]]
 name = "tincan"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "argon2",
  "audiopus",
+ "blake2",
  "bytes",
  "chrono",
  "clap",
