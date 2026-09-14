@@ -147,7 +147,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Only a tag publishes. Without this guard a workflow_dispatch run — the
+      # way to rehearse a release before committing to it — would create a
+      # public release named after whatever branch it was started from. The
+      # artifacts are uploaded either way, so a dispatch run still answers the
+      # question it was started to answer: did all five targets build.
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
