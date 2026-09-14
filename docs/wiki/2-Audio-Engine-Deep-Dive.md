@@ -40,7 +40,8 @@ Tincan's audio engine (`src/audio/`) is built for sub-30ms real-time voice commu
 
 ### 1. Audio Hardware Bridge (`src/audio/device.rs`)
 - Uses `cpal` to interface with native system sound servers: CoreAudio (macOS), ALSA / PulseAudio / PipeWire (Linux), WASAPI (Windows).
-- Enforces native 48000 Hz sample rate and 20ms frame lengths (960 samples per frame).
+- Resamples between the device's own rate and the internal 48000 Hz standard (`src/audio/resample.rs`), in both directions, so no particular hardware rate is required.
+- Works in 20ms frames (960 samples per frame) once the audio is at 48000 Hz.
 
 ### 2. Lock-Free Thread Safety (`rtrb`)
 - Audio hardware callbacks run in high-priority real-time threads.

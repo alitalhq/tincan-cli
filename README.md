@@ -73,18 +73,38 @@ npx tincan-cli host
 npm install -g tincan-cli
 ```
 
-**Shell script:**
+**Shell script (macOS & Linux):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bilalyazicioglu/tincan-cli/main/install.sh | sh
 ```
 
 This downloads a prebuilt binary for your platform into `~/.local/bin` and verifies its
-checksum. macOS (Apple Silicon) and Linux (x86_64) have prebuilt binaries; anywhere
-else — Intel Macs and arm64 Linux included — the script falls back to building from
-source. If
-you would rather read the script before running it — always a reasonable instinct with
-`curl | sh` — it lives at [`install.sh`](install.sh) in this repo.
+checksum. Anywhere without one it falls back to building from source. If you would rather
+read the script before running it — always a reasonable instinct with `curl | sh` — it
+lives at [`install.sh`](install.sh) in this repo.
+
+**Windows:** use `npx tincan-cli host`, or download
+`tincan-x86_64-pc-windows-msvc.zip` from the
+[latest release](https://github.com/bilalyazicioglu/tincan-cli/releases/latest) and put
+`tincan.exe` somewhere on your `PATH`. The shell script above is POSIX and will not
+install it for you.
+
+Prebuilt binaries are published for these five targets:
+
+| Platform | Target |
+| :--- | :--- |
+| macOS, Apple Silicon | `aarch64-apple-darwin` |
+| macOS, Intel | `x86_64-apple-darwin` |
+| Linux, x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux, arm64 | `aarch64-unknown-linux-gnu` |
+| Windows, x64 | `x86_64-pc-windows-msvc` |
+
+A word on the last row: the Windows binary compiles and the test suite passes on
+Windows in CI, which is not the same as the application having been used there. The
+terminal UI, WASAPI device enumeration and the microphone permission prompt have not
+been exercised on a real Windows machine. If you try it, [say how it
+went](https://github.com/bilalyazicioglu/tincan-cli/issues).
 
 **From source**, if you prefer it or your platform has no prebuilt binary:
 
@@ -103,7 +123,8 @@ sudo apt install libopus-dev pkg-config libasound2-dev   # Debian/Ubuntu
 Without a system Opus, the build compiles the vendored C source instead, which needs
 autotools (`autoconf`, `automake`, `libtool`). Either way it takes a few minutes.
 
-However you install it, you need a microphone and speaker that run at 48000 Hz. On the first run your
+However you install it, you need a microphone and a speaker; any sample rate will do, since
+tincan resamples to and from the 48 kHz Opus works at. On the first run your
 operating system will ask for microphone permission — on macOS the prompt comes from the
 terminal app running tincan (Terminal, iTerm, VS Code…), not from tincan itself.
 
@@ -348,9 +369,10 @@ decisions and are not used in the product.
 
 - **The coordinator is a single point of failure.** If the host leaves, the room
   dissolves. Leader handover was deliberately left out of the MVP.
-- **48 kHz required.** There is no resampling; if your device runs at another rate tincan
-  says so plainly and falls back to text chat rather than producing broken audio in
-  silence.
+- **A device that reports no format cannot be opened.** Any sample rate works — capture
+  and playback are resampled to and from Opus's 48 kHz with cubic interpolation, 16 kHz
+  Bluetooth headsets included — but a device that will not say what format it runs at is
+  refused rather than guessed at, and tincan says so and falls back to text chat.
 - **The invite code is 63 characters.** It cannot be shortened, because it is the public
   key itself — fine for copy and paste, not for reading down the phone. Open the room by
   name for an invite you can say out loud.
