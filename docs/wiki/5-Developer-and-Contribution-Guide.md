@@ -33,7 +33,7 @@ cd tincan-cli
 cargo build
 
 # Run room host
-cargo run -- host --name alice --room lobby
+cargo run -- host lobby --name alice
 
 # Run room join
 cargo run -- join <code-string> --name bob

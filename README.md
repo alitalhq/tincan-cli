@@ -94,11 +94,29 @@ terminal app running tincan (Terminal, iTerm, VS Code…), not from tincan itsel
 **Open a room:**
 
 ```bash
-tincan host --name alice --room lobby --password secret
+tincan host lobby --name alice
 ```
 
-It prints an invite code, puts it on your clipboard, and waits for you to press Enter
-before taking over the screen. Send it to your friends — copy and paste, 63 characters.
+```
+room:        lobby
+passphrase:  chestnut-ferry-lens-moss
+```
+
+The room's address is derived from its name and passphrase, so that is all your friends
+need — two things you can say down the phone or write on a whiteboard. The passphrase is
+generated for you: it is what stops strangers from guessing their way into the room, so
+bring your own with `-p` only if it is as strong (tincan warns when it is not).
+
+**Open a room behind an invite code instead:**
+
+```bash
+tincan host --name alice --password secret
+```
+
+Without a room name tincan prints an invite code, puts it on your clipboard, and waits
+for you to press Enter before taking over the screen. Send it to your friends — copy and
+paste, 63 characters. The code is the host's public key, so this is the way in whose
+security does not rest on the passphrase.
 
 Once the interface is up the footer only has room for the first group of the code. Press
 `F1` to print the whole thing into the chat pane and copy it again, so you can invite
@@ -107,8 +125,14 @@ someone without restarting the room.
 **Join a room:**
 
 ```bash
+tincan join lobby --name bob                            # asks for the passphrase
 tincan join n73w-kuqc-uog2-... --name bob --password secret
 ```
+
+`join` takes either a room name or an invite code. Joining by name without `-p` asks for
+the passphrase, which keeps it out of the process list. Case, spaces, dashes and
+underscores are forgiven in both room names and passphrases: `Chestnut Ferry Lens Moss`
+works.
 
 **See your audio devices:**
 
@@ -129,8 +153,8 @@ tincan completions fish > ~/.config/fish/completions/tincan.fish # fish
 | Option             | Description                                                    |
 | ------------------ | -------------------------------------------------------------- |
 | `--name`, `-n`     | Your nickname in the room (default: your system username)      |
-| `--password`, `-p` | Room password. Without one, anyone with the code can walk in   |
-| `--room`           | Room name (`host` only)                                        |
+| `ROOM`             | `host`: room name (optional). `join`: room name or invite code |
+| `--password`, `-p` | Passphrase. Generated for a named room when left out           |
 | `--channels`       | Comma-separated channel list (default: `general,gaming,music`) |
 | `--no-voice`       | Skip audio entirely; text chat only                            |
 | `--input`          | Microphone to use (a distinctive part of the name is enough)   |
@@ -213,15 +237,21 @@ public key.
 
 ## Security
 
-The password never travels over the wire: the coordinator sends a random nonce and the
-client returns `Argon2id(password, nonce)`. Because the nonce is fresh on every
-connection, a captured proof cannot be replayed.
+The password never travels over the wire. Both sides stretch it once with Argon2id into an
+admission key; the coordinator sends a random nonce and the client returns a keyed
+BLAKE2b MAC of it. Because the nonce is fresh on every connection, a captured proof cannot
+be replayed, and the coordinator spends no Argon2 work on connection attempts.
 
 The password is not for encryption but for **admission control** — QUIC already handles
 the encryption.
 
+A room opened by name goes further: its coordinator key *is* `Argon2id(passphrase, room
+name)`, so the passphrase is the room's address as well as its lock. That is what makes
+the invite speakable, and it has costs, listed under [Known limits](#known-limits).
+
 > `--password` is visible on the command line, so other users on the same machine can
-> read it with `ps`. Keep that in mind on a shared machine.
+> read it with `ps`. `tincan join <room>` without `-p` asks for the passphrase instead,
+> and `tincan host <room>` without `-p` generates one.
 
 ## Development
 
@@ -243,7 +273,9 @@ src/
   proto.rs        On-the-wire types (control messages + voice packet header)
   room.rs         The room's authoritative state — the coordinator's single source
                   of truth, pure and tested
-  auth.rs         Password proof (Argon2id + nonce)
+  auth.rs         Admission (Argon2id-stretched key, MAC over a nonce) and the
+                  identity of a room opened by name
+  passphrase.rs   Generated four-word passphrases, weak-password warning
   invite.rs       The invite code: base32, grouped, tolerant of pasting
   net/
     endpoint.rs   iroh endpoint setup, identity conversions
@@ -273,7 +305,24 @@ decisions and are not used in the product.
   says so plainly and falls back to text chat rather than producing broken audio in
   silence.
 - **The invite code is 63 characters.** It cannot be shortened, because it is the public
-  key itself — fine for copy and paste, not for reading down the phone.
+  key itself — fine for copy and paste, not for reading down the phone. Open the room by
+  name for an invite you can say out loud.
+- **A room opened by name belongs to whoever knows the passphrase.** Its key no longer
+  identifies a machine, which has three consequences:
+  1. *Impersonation from inside.* Anyone with the passphrase can open a rival room under
+     the same name and greet the people who join it.
+  2. *Silent takeover.* Address records are signed by the room's key, so someone with the
+     passphrase can publish their own addresses under it while the real host is running.
+     The freshest record wins, and the host never notices.
+  3. *Existence is guessable.* Anyone can compute the key for ("lobby", "123456") and look
+     it up. Argon2id's cost is the only defence — which is why the passphrase is
+     generated unless you bring your own.
+
+  (1) and (2) are insider attacks, tolerable for a room of friends. If they are not for
+  yours, open the room without a name and share the invite code.
+- **A wrong room name or passphrase looks like a closed room.** It derives a different
+  address, where nobody is listening, so tincan cannot tell you which of the two was
+  wrong.
 - **Scale is 2–6 people.** In a mesh everyone sends to everyone; past 8 you would need
   the coordinator to mix the audio (an SFU).
 - **Push-to-talk is not hold-to-talk.** Terminals generally do not report key-release
